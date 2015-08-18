@@ -116,12 +116,13 @@ module ActiveMerchant #:nodoc:
 
       def parse(body)
         reply = {}
+        url = (test? ? test_url : live_url)
         xml = REXML::Document.new(body)
         if root = REXML::XPath.first(xml, "//checkout")
           reply[:success] = true
           reply[:code] = REXML::XPath.first(root, "//code").text
           reply[:date] = REXML::XPath.first(root, "//date").text
-          reply[:message] = "Pay with Pagseguro: https://pagseguro.uol.com.br/v2/checkout/payment.html?code="+reply[:code]
+          reply[:message] = "Pay with Pagseguro: #{url}/payment.html?code="+reply[:code]
         elsif REXML::XPath.first(xml, "//errors")
           reply[:success] = false
           errors = REXML::XPath.match(xml, "//errors" )
