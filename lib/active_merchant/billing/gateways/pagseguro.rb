@@ -1,8 +1,8 @@
 module ActiveMerchant #:nodoc:
   module Billing #:nodoc:
     class PagseguroGateway < Gateway
-      self.test_url = 'https://ws.sandbox.pagseguro.uol.com.br/v2/checkout'
-      self.live_url = 'https://ws.pagseguro.uol.com.br/v2/checkout'
+      self.test_url = 'https://ws.sandbox.pagseguro.uol.com.br'
+      self.live_url = 'https://ws.pagseguro.uol.com.br'
 
       self.supported_countries = ['BR']
       self.default_currency = 'BRL'
@@ -11,7 +11,26 @@ module ActiveMerchant #:nodoc:
       self.homepage_url = 'http://pagseguro.com.br/'
       self.display_name = 'Pagseguro'
 
-      STANDARD_ERROR_CODE_MAPPING = {}
+      STANDARD_TRANSACTION_STATUS_CODE = {
+        1 => "Aguardando pagamento",
+        2 => "Em análise  ",
+        3 => "Paga",
+        4 => "Disponível",
+        5 => "Em disputa",
+        6 => "Devolvida",
+        7 => "Cancelada",
+        8 => "Chargeback debitado",
+        9 => "Em contestação",
+      }
+      
+      STANDARD_PAYMENT_METHOD_TYPE = {
+        1 => "Cartão de crédito",
+        2 => "Boleto",
+        3 => "Débito online (TEF)",
+        4 => "Saldo PagSeguro",
+        5 => "Oi Paggo",
+        7 => "Depósito em conta",
+      }
 
       def initialize(options={})
         requires!(options, :pagseguroemail, :token)
@@ -22,7 +41,6 @@ module ActiveMerchant #:nodoc:
         post = {}
         add_merchant_data(post)
         add_invoice(post, options)
-        #add_payment(post, payment)
         add_address(post, options)
         add_customer_data(post, options)
 
@@ -31,31 +49,45 @@ module ActiveMerchant #:nodoc:
 
       def authorize(money, payment, options={})
         post = {}
-        add_invoice(post, money, options)
-        add_payment(post, payment)
-        add_address(post, payment, options)
+        add_merchant_data(post)
+        add_invoice(post, options)
+        add_address(post, options)
         add_customer_data(post, options)
 
         commit('authonly', post)
       end
 
-      def capture(money, authorization, options={})
+      def capture(transaction_code)
+        post = {}
+        post[:transaction_code] = transaction_code 
+        add_merchant_data(post)
         commit('capture', post)
       end
 
-      def refund(money, authorization, options={})
-        commit('refund', post)
+      def transactions_by_date(initial_date = Time.now - 3600, final_date = Time.now, page=1, max_results=50)
+        initial_date = initial_date.strftime("%Y-%m-%dT%H:%M")
+        final_date = final_date.strftime("%Y-%m-%dT%H:%M")
+        post = {}
+        post[:initialDate] = initial_date
+        post[:finalDate] = final_date
+        post[:page] = page
+        post[:maxPageResults] = max_results
+        post[:abandoned] = false
+        add_merchant_data(post)
+        commit('transactions_by_date', post)
       end
 
-      def void(authorization, options={})
-        commit('void', post)
-      end
-
-      def verify(credit_card, options={})
-        MultiResponse.run(:use_first_response) do |r|
-          r.process { authorize(100, credit_card, options) }
-          r.process(:ignore_result) { void(r.authorization, options) }
-        end
+      def transactions_abandoned(initial_date = Time.now - 3600, final_date = Time.now, page=1, max_results=50)
+        initial_date = initial_date.strftime("%Y-%m-%dT%H:%M")
+        final_date = final_date.strftime("%Y-%m-%dT%H:%M")
+        post = {}
+        post[:initialDate] = initial_date
+        post[:finalDate] = final_date
+        post[:page] = page
+        post[:maxPageResults] = max_results
+        post[:abandoned] = true
+        add_merchant_data(post)
+        commit('transactions_by_date', post)
       end
 
       def supports_scrubbing?
@@ -104,9 +136,7 @@ module ActiveMerchant #:nodoc:
         end
 
         post[:extraAmount] = amount(options[:extra_amout]) unless options[:extra_amout].blank?
-      end
-
-      def add_payment(post, payment)
+        post[:redirectURL] = options[:redirect_url] unless options[:redirect_url].blank?
       end
 
       def add_merchant_data(post)
@@ -121,7 +151,21 @@ module ActiveMerchant #:nodoc:
           reply[:success] = true
           reply[:code] = REXML::XPath.first(root, "//code").text
           reply[:date] = REXML::XPath.first(root, "//date").text
-          reply[:message] = "Pay with Pagseguro: https://pagseguro.uol.com.br/v2/checkout/payment.html?code="+reply[:code]
+          sandbox = (test? ? "sandbox." : "")
+          reply[:message] = "Pay with Pagseguro: https://#{sandbox}pagseguro.uol.com.br/v2/checkout/payment.html?code="+reply[:code]
+          reply[:hash_response] = Hash.from_xml(body)
+        elsif REXML::XPath.first(xml, "//transactionSearchResult")
+          reply[:success] = true
+          hash_transactions = Hash.from_xml(body)
+          reply[:result] = hash_transactions["transactionSearchResult"]
+          result = hash_transactions["transactionSearchResult"]
+          reply[:message] = "Found #{result['resultsInThisPage']} transaction on page #{result['currentPage']} of #{result['totalPages']}"
+        elsif REXML::XPath.first(xml, "//transaction")
+          reply[:success] = true
+          hash_transaction = Hash.from_xml(body)
+          transaction = hash_transaction['transaction']
+          reply[:transaction] = transaction
+          reply[:message] = "Transaction: #{transaction['code']} - Status: #{STANDARD_TRANSACTION_STATUS_CODE[transaction['status'].to_i]}"
         elsif REXML::XPath.first(xml, "//errors")
           reply[:success] = false
           errors = REXML::XPath.match(xml, "//errors" )
@@ -134,16 +178,43 @@ module ActiveMerchant #:nodoc:
             reply[:message] += "code: "+ code + " - " + message
             reply[:message] += "\n"
           end
+        else
+          reply[:success] = false
+          reply[:message] = body
         end
 
         return reply
       end
 
+      def treating_request(method,url,parameters,headers={})
+        begin
+          body = ssl_request(method, url, parameters,headers)
+        rescue ActiveMerchant::ResponseError => r
+          body = r.response.body
+        end
+        return body
+      end
+
       def commit(action, parameters)
         url = (test? ? test_url : live_url)
-        headers = {"Content-Type" => "application/x-www-form-urlencoded; charset=UTF-8"}
-        response = parse(ssl_post(url, post_data(parameters), headers))
-
+        if action == "sale"
+          url = url+"/v2/checkout"
+          response = parse(treating_request(:post, url, post_data(parameters)))
+        elsif action == "capture"
+          url = url + "/v3/transactions/"+parameters[:transaction_code]
+          parameters.delete(:transaction_code)
+          url = url+'?'+post_data(parameters)
+          response = parse(treating_request(:get, url, nil))
+        elsif action == "transactions_by_date"
+          url = "#{url}/v2/transactions"
+          if parameters.has_key? :abandoned && parameters[:abandoned]
+            parameters.delete(:abandoned)
+            url = "#{url}/abandoned"
+          end
+          url = "#{url}?#{post_data(parameters)}"
+          response = parse(treating_request(:get, url, nil))
+        end
+        
         Response.new(
           success_from(response),
           message_from(response),

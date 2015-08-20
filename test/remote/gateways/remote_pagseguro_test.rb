@@ -45,7 +45,7 @@ class RemotePagseguroTest < Test::Unit::TestCase
     response = @gateway.purchase(@options)
     assert_success response
     assert_true response.message.include? 'Pay with Pagseguro:'
-    assert_true response.body.include? '<code>'
+    assert_true response.params["hash_response"]["checkout"].has_key?("code")
   end
 
   def test_successful_purchase_with_more_options
@@ -60,12 +60,9 @@ class RemotePagseguroTest < Test::Unit::TestCase
 
   def test_failed_purchase
     @options[:billing_address][:shipping_type] = ""
-    begin 
-      @gateway.purchase(@options)
-    rescue ActiveMerchant::ResponseError => r
-      assert_equal r.message, "Failed with 400 Bad Request"
-      assert_true r.response.body.include? 'ShippingType is required'
-    end
+    response = @gateway.purchase(@options)
+    assert_failure response
+    assert_true response.message.include? "ShippingType is required."
   end
 
   # def test_successful_authorize_and_capture
@@ -83,19 +80,45 @@ class RemotePagseguroTest < Test::Unit::TestCase
   #   assert_equal 'REPLACE WITH FAILED AUTHORIZE MESSAGE', response.message
   # end
 
-  # def test_partial_capture
-  #   auth = @gateway.authorize(@amount, @options)
-  #   assert_success auth
+  def test_successful_capture
+    transaction_code = '9B24469F-6582-48B5-BCFD-7D7DD415617F'
+    response = @gateway.capture(transaction_code)
+    #puts "response: #{response.message}"
+    assert_success response
+    assert_true response.message.include? "Transaction: #{transaction_code} - Status:"
+  end
 
-  #   assert capture = @gateway.capture(@amount-1, auth.authorization)
-  #   assert_success capture
-  # end
+  def test_failed_capture
+    transaction_code = '9D55E537-945A-4D05-A2F7-0DDB0A93420E'
+    response = @gateway.capture(transaction_code)
+    #puts "response: #{response.message}"
+    assert_failure response
+    assert_equal response.message, "Not Found"
+  end
 
-  # def test_failed_capture
-  #   response = @gateway.capture(@amount, '')
-  #   assert_failure response
-  #   assert_equal 'REPLACE WITH FAILED CAPTURE MESSAGE', response.message
-  # end
+  def test_successful_transactions_by_date
+    response = @gateway.transactions_by_date(Time.now-7.days, Time.now)
+    assert_true response.message.include? "transaction on page"
+    assert_success response
+  end
+
+  def test_failed_transactions_by_date
+    response = @gateway.transactions_by_date(Time.now-7.days, Time.now, 0)
+    assert_true response.message.include? "code: 13013 - page invalid value"
+    assert_failure response
+  end
+
+  def test_seccessful_transactions_abandoned
+    response = @gateway.transactions_abandoned(Time.now-7.days, Time.now)
+    assert_true response.message.include? "transaction on page"
+    assert_success response
+  end
+
+  def test_failed_transactions_abandoned
+    response = @gateway.transactions_abandoned(Time.now-7.days, Time.now, 0)
+    assert_true response.message.include? "code: 13013 - page invalid value"
+    assert_failure response
+  end
 
   # def test_successful_refund
   #   purchase = @gateway.purchase(@options)
